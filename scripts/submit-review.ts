@@ -261,22 +261,12 @@ interface GraphQLAuthor {
 interface PreviousReviewsQuery {
   repository: {
     pullRequest: {
-      reviews: {
-        nodes: Array<{
-          id: string;
-          databaseId: number;
-          isMinimized: boolean;
-          author: GraphQLAuthor | null;
-        }>;
-      };
       reviewThreads: {
         nodes: Array<{
           id: string;
           isResolved: boolean;
           comments: {
             nodes: Array<{
-              id: string;
-              isMinimized: boolean;
               author: GraphQLAuthor | null;
               pullRequestReview: { databaseId: number } | null;
             }>;
@@ -309,31 +299,28 @@ async function graphql<T>(
 }
 
 /**
- * Tidies the PR conversation after a new review is posted, so only the latest review stands out:
- *  - collapses this bot's earlier reviews as "outdated"
- *  - resolves this bot's earlier inline comment threads
+ * Resolves the inline comment threads this bot opened in earlier reviews, the way a human reviewer
+ * marks a conversation resolved once a new round of review replaces it. Nothing is hidden or
+ * deleted: earlier reviews and their comments stay in the PR history as they were.
+ *
+ * A thread is left open if anyone other than the bot has replied in it, so an ongoing discussion
+ * is never closed automatically. Findings that still apply are raised again by the new review.
  *
  * Resolving a thread needs more than the "Pull requests: write" permission the reviewer app has by
- * default (GitHub rejects it with "Resource not accessible by integration"). When resolving is not
- * permitted, the thread's comments are collapsed as "outdated" instead, which needs no extra
- * permission; the thread itself then stays unresolved.
+ * default (GitHub rejects it with "Resource not accessible by integration"). In that case the
+ * threads are simply left open for people to resolve, and this returns after the first refusal.
  *
- * A thread is left untouched if anyone other than the bot has replied in it, so an ongoing
- * discussion is never closed automatically. Findings that still apply are raised again by the new review.
- *
- * Covers the first 100 reviews and 100 threads of a PR. Failures are logged as warnings and never
- * fail the run: the new review is already posted.
+ * Covers the first 100 threads of a PR. Failures never fail the run: the new review is already posted.
  */
-async function tidyPreviousReviews(
+async function resolvePreviousThreads(
   repoFull: string,
   prNumber: string,
   token: string,
   latest: SubmittedReview,
-): Promise<{ minimized: number; resolved: number; collapsedComments: number }> {
-  const result = { minimized: 0, resolved: 0, collapsedComments: 0 };
+): Promise<number> {
   const botId = latest.user?.id;
   const [owner, name] = repoFull.split("/");
-  if (botId === undefined || !owner || !name) return result;
+  if (botId === undefined || !owner || !name) return 0;
 
   const authorFields =
     "author { ... on Bot { databaseId } ... on User { databaseId } }";
@@ -342,15 +329,12 @@ async function tidyPreviousReviews(
     `query ($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) {
         pullRequest(number: $number) {
-          reviews(first: 100) {
-            nodes { id databaseId isMinimized ${authorFields} }
-          }
           reviewThreads(first: 100) {
             nodes {
               id
               isResolved
               comments(first: 50) {
-                nodes { id isMinimized ${authorFields} pullRequestReview { databaseId } }
+                nodes { ${authorFields} pullRequestReview { databaseId } }
               }
             }
           }
@@ -360,37 +344,9 @@ async function tidyPreviousReviews(
     { owner, name, number: Number(prNumber) },
   );
   const pr = data.repository?.pullRequest;
-  if (!pr) return result;
+  if (!pr) return 0;
 
-  for (const review of pr.reviews.nodes) {
-    if (
-      review.author?.databaseId !== botId ||
-      review.databaseId === latest.id ||
-      review.isMinimized
-    ) {
-      continue;
-    }
-    try {
-      await graphql(
-        token,
-        `mutation ($id: ID!) {
-          minimizeComment(input: { subjectId: $id, classifier: OUTDATED }) { clientMutationId }
-        }`,
-        { id: review.id },
-      );
-      result.minimized++;
-    } catch (err) {
-      console.log(
-        `::warning::이전 리뷰 ${review.databaseId}을(를) 접지 못했습니다: ${String(err)}`,
-      );
-    }
-  }
-
-  const minimizeMutation = `mutation ($id: ID!) {
-    minimizeComment(input: { subjectId: $id, classifier: OUTDATED }) { clientMutationId }
-  }`;
-  let canResolve = true;
-
+  let resolved = 0;
   for (const thread of pr.reviewThreads.nodes) {
     const comments = thread.comments.nodes;
     const first = comments[0];
@@ -403,39 +359,23 @@ async function tidyPreviousReviews(
       continue;
     }
 
-    if (canResolve) {
-      try {
-        await graphql(
-          token,
-          `mutation ($id: ID!) {
-            resolveReviewThread(input: { threadId: $id }) { clientMutationId }
-          }`,
-          { id: thread.id },
-        );
-        result.resolved++;
-        continue;
-      } catch (err) {
-        canResolve = false;
-        console.log(
-          `코멘트 스레드를 resolve할 수 없어 코멘트를 접는 방식으로 대체합니다 (${String(err)}).`,
-        );
-      }
-    }
-
-    for (const comment of comments) {
-      if (comment.isMinimized) continue;
-      try {
-        await graphql(token, minimizeMutation, { id: comment.id });
-        result.collapsedComments++;
-      } catch (err) {
-        console.log(
-          `::warning::이전 인라인 코멘트를 접지 못했습니다: ${String(err)}`,
-        );
-      }
+    try {
+      await graphql(
+        token,
+        `mutation ($id: ID!) {
+          resolveReviewThread(input: { threadId: $id }) { clientMutationId }
+        }`,
+        { id: thread.id },
+      );
+      resolved++;
+    } catch (err) {
+      console.log(
+        `이전 코멘트 스레드를 resolve할 권한이 없어 그대로 둡니다 (${String(err)}).`,
+      );
+      break;
     }
   }
-
-  return result;
+  return resolved;
 }
 
 /**
@@ -572,23 +512,17 @@ async function main() {
       }
 
       try {
-        const tidied = await tidyPreviousReviews(
+        const resolved = await resolvePreviousThreads(
           repoFull!,
           prNumber!,
           token!,
           submitted,
         );
-        if (
-          tidied.minimized > 0 ||
-          tidied.resolved > 0 ||
-          tidied.collapsedComments > 0
-        ) {
-          console.log(
-            `이전 리뷰 ${tidied.minimized}건을 접고, 코멘트 스레드 ${tidied.resolved}건을 닫고, 인라인 코멘트 ${tidied.collapsedComments}건을 접었습니다.`,
-          );
+        if (resolved > 0) {
+          console.log(`이전 코멘트 스레드 ${resolved}건을 resolve했습니다.`);
         }
       } catch (err) {
-        console.log(`::warning::이전 리뷰 정리에 실패했습니다: ${String(err)}`);
+        console.log(`::warning::이전 코멘트 스레드 정리에 실패했습니다: ${String(err)}`);
       }
     }
   }
