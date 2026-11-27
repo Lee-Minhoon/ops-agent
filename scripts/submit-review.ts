@@ -254,6 +254,161 @@ async function dismissSupersededChangeRequests(
   return dismissed;
 }
 
+interface GraphQLAuthor {
+  databaseId?: number;
+}
+
+interface PreviousReviewsQuery {
+  repository: {
+    pullRequest: {
+      reviews: {
+        nodes: Array<{
+          id: string;
+          databaseId: number;
+          isMinimized: boolean;
+          author: GraphQLAuthor | null;
+        }>;
+      };
+      reviewThreads: {
+        nodes: Array<{
+          id: string;
+          isResolved: boolean;
+          comments: {
+            nodes: Array<{
+              author: GraphQLAuthor | null;
+              pullRequestReview: { databaseId: number } | null;
+            }>;
+          };
+        }>;
+      };
+    } | null;
+  } | null;
+}
+
+async function graphql<T>(
+  token: string,
+  query: string,
+  variables: Record<string, unknown>,
+): Promise<T> {
+  const response = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: githubHeaders(token),
+    body: JSON.stringify({ query, variables }),
+  });
+  const json = (await response.json()) as {
+    data?: T;
+    errors?: Array<{ message: string }>;
+  };
+  if (!response.ok || json.errors?.length || !json.data) {
+    const detail = json.errors?.map((e) => e.message).join("; ");
+    throw new Error(detail ?? `HTTP ${response.status}`);
+  }
+  return json.data;
+}
+
+/**
+ * Tidies the PR conversation after a new review is posted, so only the latest review stands out:
+ *  - collapses this bot's earlier reviews as "outdated"
+ *  - resolves this bot's earlier inline comment threads
+ *
+ * A thread is left open if anyone other than the bot has replied in it, so an ongoing discussion
+ * is never closed automatically. Findings that still apply are raised again by the new review.
+ *
+ * Covers the first 100 reviews and 100 threads of a PR. Failures are logged as warnings and never
+ * fail the run: the new review is already posted.
+ */
+async function tidyPreviousReviews(
+  repoFull: string,
+  prNumber: string,
+  token: string,
+  latest: SubmittedReview,
+): Promise<{ minimized: number; resolved: number }> {
+  const result = { minimized: 0, resolved: 0 };
+  const botId = latest.user?.id;
+  const [owner, name] = repoFull.split("/");
+  if (botId === undefined || !owner || !name) return result;
+
+  const authorFields =
+    "author { ... on Bot { databaseId } ... on User { databaseId } }";
+  const data = await graphql<PreviousReviewsQuery>(
+    token,
+    `query ($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          reviews(first: 100) {
+            nodes { id databaseId isMinimized ${authorFields} }
+          }
+          reviewThreads(first: 100) {
+            nodes {
+              id
+              isResolved
+              comments(first: 50) {
+                nodes { ${authorFields} pullRequestReview { databaseId } }
+              }
+            }
+          }
+        }
+      }
+    }`,
+    { owner, name, number: Number(prNumber) },
+  );
+  const pr = data.repository?.pullRequest;
+  if (!pr) return result;
+
+  for (const review of pr.reviews.nodes) {
+    if (
+      review.author?.databaseId !== botId ||
+      review.databaseId === latest.id ||
+      review.isMinimized
+    ) {
+      continue;
+    }
+    try {
+      await graphql(
+        token,
+        `mutation ($id: ID!) {
+          minimizeComment(input: { subjectId: $id, classifier: OUTDATED }) { clientMutationId }
+        }`,
+        { id: review.id },
+      );
+      result.minimized++;
+    } catch (err) {
+      console.log(
+        `::warning::이전 리뷰 ${review.databaseId}을(를) 접지 못했습니다: ${String(err)}`,
+      );
+    }
+  }
+
+  for (const thread of pr.reviewThreads.nodes) {
+    const comments = thread.comments.nodes;
+    const first = comments[0];
+    if (
+      thread.isResolved ||
+      !first ||
+      first.pullRequestReview?.databaseId === latest.id ||
+      !comments.every((c) => c.author?.databaseId === botId)
+    ) {
+      continue;
+    }
+    try {
+      await graphql(
+        token,
+        `mutation ($id: ID!) {
+          resolveReviewThread(input: { threadId: $id }) { clientMutationId }
+        }`,
+        { id: thread.id },
+      );
+      result.resolved++;
+    } catch (err) {
+      console.log(
+        `::warning::이전 코멘트 스레드를 닫지 못했습니다: ${String(err)}`,
+      );
+    }
+  }
+
+  return result;
+}
+
 /**
  * Applies the guardrails (sensitive paths, change size, incomplete input), validates the inline comments,
  * and builds the final payload to submit to GitHub.
@@ -385,6 +540,22 @@ async function main() {
       );
       if (dismissed > 0) {
         console.log(`이전 변경 요청 리뷰 ${dismissed}건을 dismiss했습니다.`);
+      }
+
+      try {
+        const tidied = await tidyPreviousReviews(
+          repoFull!,
+          prNumber!,
+          token!,
+          submitted,
+        );
+        if (tidied.minimized > 0 || tidied.resolved > 0) {
+          console.log(
+            `이전 리뷰 ${tidied.minimized}건을 접고, 코멘트 스레드 ${tidied.resolved}건을 닫았습니다.`,
+          );
+        }
+      } catch (err) {
+        console.log(`::warning::이전 리뷰 정리에 실패했습니다: ${String(err)}`);
       }
     }
   }
