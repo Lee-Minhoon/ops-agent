@@ -6,20 +6,27 @@
 #     Used to send the repository_dispatch event.
 #
 # The reviewer GitHub App must also be installed on the target repository (see the README).
+#
+# Note: GitHub does not allow requesting a review from a PR's own author, so PRs opened by the
+# trigger person never start a review this way.
 
 name: Request AI Review
 
+# Runs when a specific person is requested as a reviewer on a pull request.
+# Pushing new commits does not trigger a review. To run it again, re-request that person's review;
+# while their review is still pending, remove them as a reviewer and add them back.
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review]
+    types: [review_requested]
 
 permissions: {}
 
 jobs:
   dispatch:
-    # Skip draft PRs and PRs from forks (secrets are not available to fork PRs)
+    # Change the login below to the person whose review request should trigger the AI review.
+    # PRs from forks are skipped (secrets are not available to fork PRs).
     if: >-
-      ${{ !github.event.pull_request.draft &&
+      ${{ github.event.requested_reviewer.login == 'Lee-Minhoon' &&
           github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

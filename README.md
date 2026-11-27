@@ -4,7 +4,7 @@
 
 ## 동작 흐름
 
-1. 대상 레포에서 PR이 열리거나 갱신되면 [examples/request-review.yml](examples/request-review.yml) 워크플로가 이 레포로 `pr-review-requested` 이벤트를 보냅니다.
+1. 대상 레포의 PR에서 지정한 사람이 리뷰어로 요청되면 [examples/request-review.yml](examples/request-review.yml) 워크플로가 이 레포로 `pr-review-requested` 이벤트를 보냅니다.
 2. [.github/workflows/pr-review.yml](.github/workflows/pr-review.yml)이 대상 레포 하나로 범위를 좁힌 앱 토큰을 발급받아 PR 메타데이터와 diff를 내려받습니다.
 3. diff의 각 줄에 변경 후 파일 기준 줄 번호를 붙인 `pr.annotated.diff`를 만듭니다. Claude가 인라인 코멘트의 줄 번호를 틀리지 않게 하기 위함입니다.
 4. 같은 워크플로가 대상 레포를 PR의 최신 커밋으로 `target/`에 내려받습니다. Claude가 diff 밖의 호출부나 타입 정의를 확인하기 위한 읽기 전용 자료이며, 코드를 설치하거나 실행하지 않습니다.
@@ -74,7 +74,11 @@ Claude 구독 토큰은 [scripts/set-claude-token.sh](scripts/set-claude-token.s
    3. 생성된 토큰(`github_pat_`로 시작)을 복사하고, 터미널로 돌아가 Enter를 누릅니다.
 
    스크립트는 등록 전에 토큰 형식, ops-agent 접근 가능 여부, 이벤트 전송 권한을 차례로 확인합니다. 권한 확인은 어떤 워크플로도 받지 않는 시험 이벤트(`dispatch-token-check`)를 실제로 보내는 방식이라 아무것도 실행시키지 않습니다.
-3. 이후 대상 레포에서 PR을 열거나, PR에 커밋을 푸시하거나, 드래프트를 해제하면 자동으로 리뷰가 실행됩니다.
+3. 이후 대상 레포의 PR에서 **지정한 사람이 리뷰어로 요청되면** 리뷰가 실행됩니다. 누구를 신호로 삼을지는 복사한 워크플로의 `requested_reviewer.login` 값으로 정합니다.
+   - 커밋을 푸시하는 것만으로는 다시 돌지 않습니다.
+   - 재리뷰가 필요하면 리뷰 요청 이벤트를 다시 발생시켜야 합니다. 그 사람이 이미 리뷰를 제출했다면 이름 옆의 "Re-request review"를 누르면 됩니다. 아직 리뷰를 제출하지 않아 요청이 대기 중이라면 같은 사람을 다시 요청해도 이벤트가 발생하지 않으므로, 리뷰어에서 뺐다가 다시 추가해야 합니다.
+   - GitHub은 PR 작성자 본인을 리뷰어로 요청할 수 없게 하므로, 신호로 지정된 사람이 직접 연 PR은 이 방식으로 리뷰가 시작되지 않습니다.
+   - 직접 만든 GitHub App은 리뷰어 목록에 나오지 않아서, 봇 자체를 리뷰어로 요청하는 방식은 쓸 수 없습니다.
 
 이벤트 페이로드 형식:
 
