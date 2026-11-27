@@ -275,6 +275,8 @@ interface PreviousReviewsQuery {
           isResolved: boolean;
           comments: {
             nodes: Array<{
+              id: string;
+              isMinimized: boolean;
               author: GraphQLAuthor | null;
               pullRequestReview: { databaseId: number } | null;
             }>;
@@ -311,8 +313,13 @@ async function graphql<T>(
  *  - collapses this bot's earlier reviews as "outdated"
  *  - resolves this bot's earlier inline comment threads
  *
- * A thread is left open if anyone other than the bot has replied in it, so an ongoing discussion
- * is never closed automatically. Findings that still apply are raised again by the new review.
+ * Resolving a thread needs more than the "Pull requests: write" permission the reviewer app has by
+ * default (GitHub rejects it with "Resource not accessible by integration"). When resolving is not
+ * permitted, the thread's comments are collapsed as "outdated" instead, which needs no extra
+ * permission; the thread itself then stays unresolved.
+ *
+ * A thread is left untouched if anyone other than the bot has replied in it, so an ongoing
+ * discussion is never closed automatically. Findings that still apply are raised again by the new review.
  *
  * Covers the first 100 reviews and 100 threads of a PR. Failures are logged as warnings and never
  * fail the run: the new review is already posted.
@@ -322,8 +329,8 @@ async function tidyPreviousReviews(
   prNumber: string,
   token: string,
   latest: SubmittedReview,
-): Promise<{ minimized: number; resolved: number }> {
-  const result = { minimized: 0, resolved: 0 };
+): Promise<{ minimized: number; resolved: number; collapsedComments: number }> {
+  const result = { minimized: 0, resolved: 0, collapsedComments: 0 };
   const botId = latest.user?.id;
   const [owner, name] = repoFull.split("/");
   if (botId === undefined || !owner || !name) return result;
@@ -343,7 +350,7 @@ async function tidyPreviousReviews(
               id
               isResolved
               comments(first: 50) {
-                nodes { ${authorFields} pullRequestReview { databaseId } }
+                nodes { id isMinimized ${authorFields} pullRequestReview { databaseId } }
               }
             }
           }
@@ -379,6 +386,11 @@ async function tidyPreviousReviews(
     }
   }
 
+  const minimizeMutation = `mutation ($id: ID!) {
+    minimizeComment(input: { subjectId: $id, classifier: OUTDATED }) { clientMutationId }
+  }`;
+  let canResolve = true;
+
   for (const thread of pr.reviewThreads.nodes) {
     const comments = thread.comments.nodes;
     const first = comments[0];
@@ -390,19 +402,36 @@ async function tidyPreviousReviews(
     ) {
       continue;
     }
-    try {
-      await graphql(
-        token,
-        `mutation ($id: ID!) {
-          resolveReviewThread(input: { threadId: $id }) { clientMutationId }
-        }`,
-        { id: thread.id },
-      );
-      result.resolved++;
-    } catch (err) {
-      console.log(
-        `::warning::이전 코멘트 스레드를 닫지 못했습니다: ${String(err)}`,
-      );
+
+    if (canResolve) {
+      try {
+        await graphql(
+          token,
+          `mutation ($id: ID!) {
+            resolveReviewThread(input: { threadId: $id }) { clientMutationId }
+          }`,
+          { id: thread.id },
+        );
+        result.resolved++;
+        continue;
+      } catch (err) {
+        canResolve = false;
+        console.log(
+          `코멘트 스레드를 resolve할 수 없어 코멘트를 접는 방식으로 대체합니다 (${String(err)}).`,
+        );
+      }
+    }
+
+    for (const comment of comments) {
+      if (comment.isMinimized) continue;
+      try {
+        await graphql(token, minimizeMutation, { id: comment.id });
+        result.collapsedComments++;
+      } catch (err) {
+        console.log(
+          `::warning::이전 인라인 코멘트를 접지 못했습니다: ${String(err)}`,
+        );
+      }
     }
   }
 
@@ -549,9 +578,13 @@ async function main() {
           token!,
           submitted,
         );
-        if (tidied.minimized > 0 || tidied.resolved > 0) {
+        if (
+          tidied.minimized > 0 ||
+          tidied.resolved > 0 ||
+          tidied.collapsedComments > 0
+        ) {
           console.log(
-            `이전 리뷰 ${tidied.minimized}건을 접고, 코멘트 스레드 ${tidied.resolved}건을 닫았습니다.`,
+            `이전 리뷰 ${tidied.minimized}건을 접고, 코멘트 스레드 ${tidied.resolved}건을 닫고, 인라인 코멘트 ${tidied.collapsedComments}건을 접었습니다.`,
           );
         }
       } catch (err) {
