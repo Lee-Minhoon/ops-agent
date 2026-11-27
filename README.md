@@ -6,9 +6,10 @@
 
 1. 대상 레포에서 PR이 열리거나 갱신되면 [examples/request-review.yml](examples/request-review.yml) 워크플로가 이 레포로 `pr-review-requested` 이벤트를 보냅니다.
 2. [.github/workflows/pr-review.yml](.github/workflows/pr-review.yml)이 대상 레포 하나로 범위를 좁힌 앱 토큰을 발급받아 PR 메타데이터와 diff를 내려받습니다.
-3. 같은 워크플로가 대상 레포를 PR의 최신 커밋으로 `target/`에 내려받습니다. Claude가 diff 밖의 호출부나 타입 정의를 확인하기 위한 읽기 전용 자료이며, 코드를 설치하거나 실행하지 않습니다.
-4. 헤드리스 Claude Code가 [.claude/skills/pr-review/SKILL.md](.claude/skills/pr-review/SKILL.md) 규칙에 따라 리뷰하고, [schemas/review.schema.json](schemas/review.schema.json) 형태의 JSON을 출력합니다.
-5. [scripts/submit-review.ts](scripts/submit-review.ts)가 가드레일을 적용한 뒤 GitHub Review API로 제출합니다.
+3. diff의 각 줄에 변경 후 파일 기준 줄 번호를 붙인 `pr.annotated.diff`를 만듭니다. Claude가 인라인 코멘트의 줄 번호를 틀리지 않게 하기 위함입니다.
+4. 같은 워크플로가 대상 레포를 PR의 최신 커밋으로 `target/`에 내려받습니다. Claude가 diff 밖의 호출부나 타입 정의를 확인하기 위한 읽기 전용 자료이며, 코드를 설치하거나 실행하지 않습니다.
+5. 헤드리스 Claude Code가 [.claude/skills/pr-review/SKILL.md](.claude/skills/pr-review/SKILL.md) 규칙에 따라 리뷰하고, [schemas/review.schema.json](schemas/review.schema.json) 형태의 JSON을 출력합니다.
+6. [scripts/submit-review.ts](scripts/submit-review.ts)가 가드레일을 적용한 뒤 GitHub Review API로 제출합니다.
 
 ## 설정
 
@@ -76,6 +77,7 @@ npm run typecheck
 gh pr view <번호> --repo <owner/name> \
   --json title,body,headRefOid,files,additions,deletions,changedFiles > pr_meta.json
 gh pr diff <번호> --repo <owner/name> > pr.diff
+npx tsx scripts/annotate-diff.ts pr.diff pr.annotated.diff   # Claude가 읽을 줄 번호 표기 diff
 
 # 대상 레포를 PR의 최신 커밋으로 target/ 에 내려받고, 워크플로와 동일하게 무력화
 gh repo clone <owner/name> target -- --depth 1
@@ -84,7 +86,7 @@ rm -rf target/.git
 find target -type l -delete
 find target -depth \( -name '.claude' -o -name 'CLAUDE.md' -o -name 'CLAUDE.local.md' -o -name '.mcp.json' \) -exec rm -rf {} +
 
-npx claude -p ".claude/skills/pr-review/SKILL.md 규칙을 반드시 준수하여 현재 디렉토리의 pr_meta.json과 pr.diff를 리뷰하라. PR이 적용된 대상 레포 전체 코드는 target/ 디렉토리에 있으니 변경의 영향 범위를 확인할 때 참고하라." \
+npx claude -p ".claude/skills/pr-review/SKILL.md 규칙을 반드시 준수하여 현재 디렉토리의 pr_meta.json과 pr.annotated.diff를 리뷰하라. PR이 적용된 대상 레포 전체 코드는 target/ 디렉토리에 있으니 변경의 영향 범위를 확인할 때 참고하라." \
   --tools "Read,Grep,Glob" --settings ci/claude-settings.json --strict-mcp-config \
   --json-schema "$(cat schemas/review.schema.json)" \
   --output-format json < /dev/null > review_result.json
@@ -100,5 +102,7 @@ DRY_RUN=true npm run submit-review
 ci/claude-settings.json             CI에서만 적용하는 Claude Code 권한 제한
 examples/request-review.yml         대상 레포용 호출 워크플로 템플릿
 schemas/review.schema.json          리뷰 출력 JSON 스키마
+scripts/annotate-diff.ts            diff의 각 줄에 변경 후 파일 기준 줄 번호를 붙임
 scripts/submit-review.ts            가드레일 적용 및 리뷰 제출
+scripts/set-claude-token.sh         구독 토큰을 클립보드에서 읽어 시크릿으로 등록
 ```

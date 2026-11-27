@@ -3,6 +3,7 @@ node_modules/
 # Artifacts generated during a workflow run
 pr_meta.json
 pr.diff
+pr.annotated.diff
 review_result.json
 target/
 
