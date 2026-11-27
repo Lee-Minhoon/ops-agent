@@ -1,0 +1,19 @@
+{
+  "name": "ops-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "submit-review": "tsx scripts/submit-review.ts"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.332",
+    "@types/node": "20.19.43",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}

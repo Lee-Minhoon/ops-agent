@@ -1,0 +1,12 @@
+node_modules/
+
+# Artifacts generated during a workflow run
+pr_meta.json
+pr.diff
+review_result.json
+target/
+
+# Local settings / secrets
+.env
+.env.*
+.claude/settings.local.json

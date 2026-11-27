@@ -1,0 +1,138 @@
+name: AI PR Review Machine
+
+on:
+  repository_dispatch:
+    types: [pr-review-requested]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.pr_number }}
+  cancel-in-progress: true
+
+env:
+  MAX_DIFF_LINES: "4000"
+  REVIEW_MODEL: ${{ vars.REVIEW_MODEL || 'claude-opus-5-5' }}
+  REVIEW_MAX_BUDGET_USD: ${{ vars.REVIEW_MAX_BUDGET_USD || '2' }}
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout ops-agent
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install pinned dependencies
+        run: npm ci
+
+      # The payload is external input: validate its format, then split it into owner / name
+      - name: Validate dispatch payload
+        id: target
+        env:
+          REPO: ${{ github.event.client_payload.repo }}
+          PR_NUM: ${{ github.event.client_payload.pr_number }}
+        run: |
+          if [[ ! "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::client_payload.repo 형식이 올바르지 않습니다: $REPO"
+            exit 1
+          fi
+          if [[ ! "$PR_NUM" =~ ^[0-9]+$ ]]; then
+            echo "::error::client_payload.pr_number 형식이 올바르지 않습니다: $PR_NUM"
+            exit 1
+          fi
+          echo "owner=${REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      # Issue an app token scoped to the single target repository
+      - name: Generate Reviewer App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.REVIEWER_APP_ID }}
+          private-key: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
+          owner: ${{ steps.target.outputs.owner }}
+          repositories: ${{ steps.target.outputs.name }}
+
+      - name: Fetch PR Metadata and Diff
+        id: fetch
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.event.client_payload.repo }}
+          PR_NUM: ${{ github.event.client_payload.pr_number }}
+        run: |
+          gh pr view "$PR_NUM" --repo "$REPO" \
+            --json title,body,headRefOid,files,additions,deletions,changedFiles > pr_meta.json
+
+          gh pr diff "$PR_NUM" --repo "$REPO" > "$RUNNER_TEMP/pr.full.diff"
+          total_lines=$(wc -l < "$RUNNER_TEMP/pr.full.diff")
+          if (( total_lines > MAX_DIFF_LINES )); then
+            head -n "$MAX_DIFF_LINES" "$RUNNER_TEMP/pr.full.diff" > pr.diff
+            echo "DIFF_TRUNCATED=true" >> "$GITHUB_ENV"
+            echo "::warning::Diff가 ${total_lines}줄이라 앞 ${MAX_DIFF_LINES}줄만 리뷰합니다."
+          else
+            mv "$RUNNER_TEMP/pr.full.diff" pr.diff
+            echo "DIFF_TRUNCATED=false" >> "$GITHUB_ENV"
+          fi
+
+          head_sha=$(jq -r '.headRefOid' pr_meta.json)
+          if [[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::PR head 커밋을 확인할 수 없습니다: $head_sha"
+            exit 1
+          fi
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+      # Check out the target repository as read-only reference material, so code outside the diff
+      # (call sites, type definitions) can be inspected
+      - name: Checkout target repository (read-only context)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: ${{ steps.fetch.outputs.head_sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+
+      # target/ is controlled by the PR author. Remove the files Claude Code would load as configuration
+      # and any symlinks that could point outside the working directory. Never install or run this code.
+      - name: Neutralize untrusted checkout
+        run: |
+          rm -rf target/.git
+          find target -type l -delete
+          find target -depth \( -name '.claude' -o -name 'CLAUDE.md' -o -name 'CLAUDE.local.md' -o -name '.mcp.json' \) -exec rm -rf {} +
+
+      # PR content is untrusted input, so only read-only tools (Read, Grep, Glob) are enabled
+      - name: Run Headless Claude Code
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          PROMPT=".claude/skills/pr-review/SKILL.md 규칙을 반드시 준수하여 현재 디렉토리의 pr_meta.json과 pr.diff를 리뷰하라. PR이 적용된 대상 레포 전체 코드는 target/ 디렉토리에 있으니 변경의 영향 범위를 확인할 때 참고하라."
+          if [[ "$DIFF_TRUNCATED" == "true" ]]; then
+            PROMPT+=" 주의: pr.diff는 앞 ${MAX_DIFF_LINES}줄만 포함하도록 잘려 있으므로 APPROVE를 선택하지 말고, 일부만 검토했음을 summary에 명시하라."
+          fi
+
+          npx claude -p "$PROMPT" \
+            --model "$REVIEW_MODEL" \
+            --tools "Read,Grep,Glob" \
+            --settings ci/claude-settings.json \
+            --strict-mcp-config \
+            --max-budget-usd "$REVIEW_MAX_BUDGET_USD" \
+            --json-schema "$(cat schemas/review.schema.json)" \
+            --output-format json < /dev/null > review_result.json
+
+      # Runs even if the Claude step failed, so the PR still gets a failure notice
+      - name: Submit Review to GitHub
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.event.client_payload.repo }}
+          PR_NUM: ${{ github.event.client_payload.pr_number }}
+        run: npx tsx scripts/submit-review.ts

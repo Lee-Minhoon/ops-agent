@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash",
+      "Write",
+      "Edit",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(//proc/**)"
+    ]
+  }
+}

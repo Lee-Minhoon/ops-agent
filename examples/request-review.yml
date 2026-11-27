@@ -1,0 +1,37 @@
+# Copy this file to .github/workflows/request-review.yml in each repository that should be reviewed.
+#
+# Required secret (set on the target repository or its organization):
+#   OPS_AGENT_DISPATCH_TOKEN
+#     A fine-grained PAT with "Contents: Read and write" permission on the ops-agent repository.
+#     Used to send the repository_dispatch event.
+#
+# The reviewer GitHub App must also be installed on the target repository (see the README).
+
+name: Request AI Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+permissions: {}
+
+jobs:
+  dispatch:
+    # Skip draft PRs and PRs from forks (secrets are not available to fork PRs)
+    if: >-
+      ${{ !github.event.pull_request.draft &&
+          github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch review request to ops-agent
+        env:
+          GH_TOKEN: ${{ secrets.OPS_AGENT_DISPATCH_TOKEN }}
+          OPS_AGENT_REPO: Lee-Minhoon/ops-agent
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          gh api "repos/$OPS_AGENT_REPO/dispatches" \
+            -f "event_type=pr-review-requested" \
+            -f "client_payload[repo]=$REPO" \
+            -F "client_payload[pr_number]=$PR_NUM"
