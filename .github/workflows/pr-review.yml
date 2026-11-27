@@ -22,12 +22,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout ops-agent
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
 
       - name: Install pinned dependencies
@@ -54,9 +54,9 @@ jobs:
       # Issue an app token scoped to the single target repository
       - name: Generate Reviewer App Token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.REVIEWER_APP_ID }}
+          client-id: ${{ secrets.REVIEWER_APP_CLIENT_ID }}
           private-key: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
           owner: ${{ steps.target.outputs.owner }}
           repositories: ${{ steps.target.outputs.name }}
@@ -96,7 +96,7 @@ jobs:
       # Check out the target repository as read-only reference material, so code outside the diff
       # (call sites, type definitions) can be inspected
       - name: Checkout target repository (read-only context)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: ${{ steps.fetch.outputs.head_sha }}

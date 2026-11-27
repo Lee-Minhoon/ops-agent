@@ -22,21 +22,59 @@ GitHub App을 만들고 리뷰할 대상 레포에 설치합니다.
 | Pull requests | Read and write |
 | Contents | Read-only |
 
+App 설정 화면에서 두 가지를 챙깁니다.
+
+- **Client ID**: "About" 항목에 표시됩니다(`Iv`로 시작). 비밀 값은 아닙니다.
+- **Private key**: "Generate a private key"로 `.pem` 파일을 내려받습니다.
+
 ### 2. 이 레포(ops-agent)의 시크릿과 변수
 
 | 종류 | 이름 | 설명 |
 |---|---|---|
-| Secret | `REVIEWER_APP_ID` | 리뷰어 App의 App ID |
+| Secret | `REVIEWER_APP_CLIENT_ID` | 리뷰어 App의 Client ID |
 | Secret | `REVIEWER_APP_PRIVATE_KEY` | 리뷰어 App의 private key (PEM 전체) |
 | Secret | `CLAUDE_CODE_OAUTH_TOKEN` | Claude 구독 계정의 장기 토큰. 로컬에서 `claude setup-token`으로 발급. 구독 사용량 한도에서 차감 |
 | Secret | `ANTHROPIC_API_KEY` | Claude API 키 (Console에서 발급, 사용량만큼 과금). 위 토큰 대신 사용 가능 |
 | Variable (선택) | `REVIEW_MODEL` | 리뷰에 쓸 모델. 기본값 `claude-opus-5-5` |
 | Variable (선택) | `REVIEW_MAX_BUDGET_USD` | 리뷰 1회당 API 비용 상한(USD). 기본값 `2` |
 
+App 시크릿 두 개는 `gh`로 등록합니다.
+
+```bash
+gh secret set REVIEWER_APP_CLIENT_ID --repo Lee-Minhoon/ops-agent --body "<Client ID>"
+gh secret set REVIEWER_APP_PRIVATE_KEY --repo Lee-Minhoon/ops-agent < <내려받은 .pem 파일 경로>
+```
+
+Claude 구독 토큰은 [scripts/set-claude-token.sh](scripts/set-claude-token.sh)로 등록합니다. 스크립트가 클립보드에서 토큰을 읽으므로 **스크립트를 먼저 실행한 뒤에 토큰을 복사**해야 합니다. 토큰을 복사한 다음 명령을 복사해 붙여넣으면 클립보드가 덮어써져 엉뚱한 값이 등록됩니다.
+
+1. 터미널 창 하나에서 스크립트를 실행합니다. 안내를 출력하고 Enter를 기다립니다.
+   ```bash
+   ./scripts/set-claude-token.sh
+   ```
+2. 다른 터미널 창에서 토큰을 발급받습니다. 브라우저 로그인이 필요합니다.
+   ```bash
+   npx claude setup-token
+   ```
+3. 출력된 토큰(`sk-ant-oat`로 시작)만 복사합니다.
+4. 첫 번째 창으로 돌아가 Enter를 누릅니다.
+
+클립보드 내용이 토큰 형식이 아니면 등록하지 않고 종료합니다. 두 스크립트 모두 `pbpaste`를 쓰므로 macOS에서만 동작합니다.
+
 ### 3. 대상 레포
 
 1. [examples/request-review.yml](examples/request-review.yml)을 대상 레포의 `.github/workflows/`에 복사합니다.
-2. ops-agent 레포에 대해 **Contents: Read and write** 권한을 가진 fine-grained PAT을 만들어 대상 레포의 `OPS_AGENT_DISPATCH_TOKEN` 시크릿으로 등록합니다.
+2. 대상 레포가 ops-agent에 리뷰 요청을 보낼 때 쓸 토큰을 등록합니다. [scripts/set-dispatch-token.sh](scripts/set-dispatch-token.sh)를 사용하며, 위와 마찬가지로 **스크립트를 먼저 실행한 뒤에 토큰을 복사**합니다.
+   1. 스크립트를 실행합니다. 인자는 대상 레포입니다.
+      ```bash
+      ./scripts/set-dispatch-token.sh <owner/대상-레포>
+      ```
+   2. <https://github.com/settings/personal-access-tokens/new>에서 fine-grained PAT을 만듭니다.
+      - Repository access: "Only select repositories"에서 `ops-agent`만 선택
+      - Repository permissions → Contents: **Read and write** (`repository_dispatch` 전송에 GitHub이 요구하는 권한)
+   3. 생성된 토큰(`github_pat_`로 시작)을 복사하고, 터미널로 돌아가 Enter를 누릅니다.
+
+   스크립트는 등록 전에 토큰 형식, ops-agent 접근 가능 여부, 이벤트 전송 권한을 차례로 확인합니다. 권한 확인은 어떤 워크플로도 받지 않는 시험 이벤트(`dispatch-token-check`)를 실제로 보내는 방식이라 아무것도 실행시키지 않습니다.
+3. 이후 대상 레포에서 PR을 열거나, PR에 커밋을 푸시하거나, 드래프트를 해제하면 자동으로 리뷰가 실행됩니다.
 
 이벤트 페이로드 형식:
 
@@ -67,7 +105,7 @@ Claude가 `APPROVE`를 내더라도 아래 중 하나에 해당하면 `COMMENT`�
 ## 로컬 개발
 
 ```bash
-npm ci
+npm ci          # Node.js 24 기준
 npm run typecheck
 ```
 
