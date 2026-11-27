@@ -27,7 +27,8 @@ GitHub App을 만들고 리뷰할 대상 레포에 설치합니다.
 |---|---|---|
 | Secret | `REVIEWER_APP_ID` | 리뷰어 App의 App ID |
 | Secret | `REVIEWER_APP_PRIVATE_KEY` | 리뷰어 App의 private key (PEM 전체) |
-| Secret | `ANTHROPIC_API_KEY` | Claude API 키 |
+| Secret | `CLAUDE_CODE_OAUTH_TOKEN` | Claude 구독 계정의 장기 토큰. 로컬에서 `claude setup-token`으로 발급. 구독 사용량 한도에서 차감 |
+| Secret | `ANTHROPIC_API_KEY` | Claude API 키 (Console에서 발급, 사용량만큼 과금). 위 토큰 대신 사용 가능 |
 | Variable (선택) | `REVIEW_MODEL` | 리뷰에 쓸 모델. 기본값 `claude-opus-5-5` |
 | Variable (선택) | `REVIEW_MAX_BUDGET_USD` | 리뷰 1회당 API 비용 상한(USD). 기본값 `2` |
 
