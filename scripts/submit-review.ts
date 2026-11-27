@@ -154,22 +154,35 @@ export function parseClaudeOutput(rawContent: string): ReviewOutput {
   return normalizeReview(JSON.parse(text));
 }
 
+interface SubmittedReview {
+  id: number;
+  user: { id: number; login: string } | null;
+}
+
+interface ExistingReview extends SubmittedReview {
+  state: string;
+}
+
+function githubHeaders(token: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "Content-Type": "application/json",
+  };
+}
+
 async function submitReview(
   repoFull: string,
   prNumber: string,
   token: string,
   commitId: string,
   payload: ReviewPayload,
-): Promise<void> {
+): Promise<SubmittedReview> {
   const apiUrl = `https://api.github.com/repos/${repoFull}/pulls/${prNumber}/reviews`;
   const response = await fetch(apiUrl, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      "Content-Type": "application/json",
-    },
+    headers: githubHeaders(token),
     body: JSON.stringify({ commit_id: commitId, ...payload }),
   });
 
@@ -177,6 +190,68 @@ async function submitReview(
     const errText = await response.text();
     throw new Error(`GitHub Review API 실패 (${response.status}): ${errText}`);
   }
+  return (await response.json()) as SubmittedReview;
+}
+
+/**
+ * Dismisses this bot's earlier REQUEST_CHANGES reviews on the PR, now that `latest` replaces them.
+ *
+ * GitHub only counts a reviewer's latest APPROVE / REQUEST_CHANGES. A COMMENT review (for example an
+ * approval downgraded by a guardrail) does not override an earlier REQUEST_CHANGES, so without this
+ * the PR would stay "changes requested" after the author fixed everything.
+ *
+ * Failures here are logged as warnings and never fail the run: the new review is already posted.
+ */
+async function dismissSupersededChangeRequests(
+  repoFull: string,
+  prNumber: string,
+  token: string,
+  latest: SubmittedReview,
+  commitId: string,
+): Promise<number> {
+  if (!latest.user) return 0;
+  const baseUrl = `https://api.github.com/repos/${repoFull}/pulls/${prNumber}/reviews`;
+  const headers = githubHeaders(token);
+
+  const stale: ExistingReview[] = [];
+  for (let page = 1; ; page++) {
+    const response = await fetch(`${baseUrl}?per_page=100&page=${page}`, { headers });
+    if (!response.ok) {
+      console.log(`::warning::이전 리뷰 목록을 가져오지 못했습니다 (${response.status}).`);
+      return 0;
+    }
+    const reviews = (await response.json()) as ExistingReview[];
+    for (const review of reviews) {
+      if (
+        review.user?.id === latest.user.id &&
+        review.id !== latest.id &&
+        review.state === "CHANGES_REQUESTED"
+      ) {
+        stale.push(review);
+      }
+    }
+    if (reviews.length < 100) break;
+  }
+
+  let dismissed = 0;
+  for (const review of stale) {
+    const response = await fetch(`${baseUrl}/${review.id}/dismissals`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        message: `최신 커밋(${commitId.slice(0, 7)})에 대한 새 리뷰로 대체되었습니다.`,
+        event: "DISMISS",
+      }),
+    });
+    if (response.ok) {
+      dismissed++;
+    } else {
+      console.log(
+        `::warning::이전 리뷰 ${review.id}을(를) dismiss하지 못했습니다 (${response.status}): ${await response.text()}`,
+      );
+    }
+  }
+  return dismissed;
 }
 
 /**
@@ -287,10 +362,31 @@ async function main() {
   if (dryRun) {
     console.log(JSON.stringify(payload, null, 2));
   } else {
-    await submitReview(repoFull!, prNumber!, token!, meta.headRefOid, payload);
+    const submitted = await submitReview(
+      repoFull!,
+      prNumber!,
+      token!,
+      meta.headRefOid,
+      payload,
+    );
     console.log(
       `리뷰 제출 완료: [${payload.event}] (인라인 코멘트 ${payload.comments.length}건)`,
     );
+
+    // Only a review that actually covered the whole change may replace earlier verdicts.
+    // A failure notice or a review of a truncated diff says nothing about whether old findings were fixed.
+    if (!reviewError && !diffTruncated) {
+      const dismissed = await dismissSupersededChangeRequests(
+        repoFull!,
+        prNumber!,
+        token!,
+        submitted,
+        meta.headRefOid,
+      );
+      if (dismissed > 0) {
+        console.log(`이전 변경 요청 리뷰 ${dismissed}건을 dismiss했습니다.`);
+      }
+    }
   }
 
   if (reviewError) throw reviewError;
